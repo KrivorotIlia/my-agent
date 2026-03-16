@@ -2,11 +2,13 @@ import os
 import json
 import sqlite3
 import anthropic
-from ddgs import DDGS
+from datetime import datetime
+from tavily import TavilyClient
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+tavily = TavilyClient(api_key=os.environ.get("TAVILY_API_KEY"))
 TELEGRAM_KEY = os.environ.get("TELEGRAM_TOKEN")
 DB_PATH = "memory.db"
 
@@ -46,38 +48,35 @@ def get_history(user_id, limit=20):
 
 def search_web(query):
     print(f"Ищу: {query}")
-    results = DDGS().text(query, max_results=5)
+    result = tavily.search(query=query, max_results=5, search_depth="advanced")
     text = ""
-    for r in results:
-        text += f"- {r['title']}: {r['body']}\n"
+    for r in result.get("results", []):
+        text += f"- {r['title']}: {r['content']}\n"
     return text
 
-tools = [{"name": "search_web", "description": "Поиск в интернете", "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}]
+tools = [{"name": "search_web", "description": "Глубокий поиск актуальной информации в интернете", "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}]
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
     user_text = update.message.text
+    today = datetime.now().strftime("%d.%m.%Y")
     await update.message.chat.send_action("typing")
-
     save_message(user_id, "user", user_text)
     messages = get_history(user_id)
-
     while True:
         response = client.messages.create(
             model="claude-opus-4-5",
             max_tokens=1024,
-            system=f"Ты полезный персональный ассистент пользователя {user_name}. Отвечай на русском языке. Используй поиск для актуальной информации. Помни контекст разговора.",
+            system=f"Ты полезный персональный ассистент пользователя {user_name}. Сегодня {today}. Отвечай на русском языке. Используй поиск для актуальной информации. При поиске событий и концертов ищи только будущие события после {today}. Давай подробные и конкретные ответы.",
             tools=tools,
             messages=messages
         )
-
         if response.stop_reason == "end_turn":
             answer = response.content[0].text
             save_message(user_id, "assistant", answer)
             await update.message.reply_text(answer)
             break
-
         if response.stop_reason == "tool_use":
             save_message(user_id, "assistant", response.content)
             messages = get_history(user_id)
@@ -91,15 +90,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name
-    await update.message.reply_text(f"Привет, {name}! Я твой персональный ассистент. Помню все наши разговоры. Чем могу помочь?")
+    await update.message.reply_text(f"Привет, {name}! Я твой персональный ассистент. Знаю сегодняшнюю дату и найду только актуальные события. Чем могу помочь?")
 
 def main():
     init_db()
-    from telegram.ext import CommandHandler
     app = Application.builder().token(TELEGRAM_KEY).build()
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Бот с памятью запущен!")
+    print("Бот запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
