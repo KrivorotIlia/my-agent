@@ -1,15 +1,15 @@
 import os
 import json
 import sqlite3
+import requests
 import anthropic
 from datetime import datetime
-from tavily import TavilyClient
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-tavily = TavilyClient(api_key=os.environ.get("TAVILY_API_KEY"))
 TELEGRAM_KEY = os.environ.get("TELEGRAM_TOKEN")
+TAVILY_KEY = os.environ.get("TAVILY_API_KEY")
 DB_PATH = "memory.db"
 
 def init_db():
@@ -48,9 +48,13 @@ def get_history(user_id, limit=20):
 
 def search_web(query):
     print(f"Ищу: {query}")
-    result = tavily.search(query=query, max_results=5, search_depth="advanced")
+    response = requests.post(
+        "https://api.tavily.com/search",
+        json={"api_key": TAVILY_KEY, "query": query, "max_results": 5, "search_depth": "advanced"}
+    )
+    data = response.json()
     text = ""
-    for r in result.get("results", []):
+    for r in data.get("results", []):
         text += f"- {r['title']}: {r['content']}\n"
     return text
 
