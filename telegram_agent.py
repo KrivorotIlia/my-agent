@@ -28,13 +28,16 @@ GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN")
 DB_PATH = "memory.db"
 
 def get_calendar_service():
+    from google.auth.transport.requests import Request
     creds = Credentials(
         token=None,
         refresh_token=GOOGLE_REFRESH_TOKEN,
         client_id=GOOGLE_CLIENT_ID,
         client_secret=GOOGLE_CLIENT_SECRET,
-        token_uri="https://oauth2.googleapis.com/token"
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=["https://www.googleapis.com/auth/calendar"]
     )
+    creds.refresh(Request())
     return build("calendar", "v3", credentials=creds)
 
 def init_db():
