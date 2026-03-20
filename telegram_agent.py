@@ -178,15 +178,25 @@ def get_calendar_events(days=7):
         service = get_calendar_service()
         now = datetime.utcnow().isoformat() + "Z"
         end = (datetime.utcnow() + timedelta(days=days)).isoformat() + "Z"
-        events_result = service.events().list(
-            calendarId="ilyakrivorot2@gmail.com", timeMin=now, timeMax=end,
-            maxResults=10, singleEvents=True, orderBy="startTime"
-        ).execute()
-        events = events_result.get("items", [])
-        if not events:
+        calendar_ids = [
+            "ilyakrivorot2@gmail.com",
+            "family132849988177750256149@group.calendar.google.com"
+        ]
+        all_events = []
+        for cal_id in calendar_ids:
+            try:
+                events_result = service.events().list(
+                    calendarId=cal_id, timeMin=now, timeMax=end,
+                    maxResults=10, singleEvents=True, orderBy="startTime"
+                ).execute()
+                all_events.extend(events_result.get("items", []))
+            except:
+                continue
+        if not all_events:
             return "Событий не найдено"
+        all_events.sort(key=lambda e: e["start"].get("dateTime", e["start"].get("date", "")))
         result = []
-        for e in events:
+        for e in all_events:
             start = e["start"].get("dateTime", e["start"].get("date", ""))
             result.append(f"- {e.get('summary', 'Без названия')} — {start}")
         return "\n".join(result)
@@ -376,3 +386,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
