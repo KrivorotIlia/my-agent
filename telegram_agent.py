@@ -179,7 +179,7 @@ def get_calendar_events(days=7):
         now = datetime.utcnow().isoformat() + "Z"
         end = (datetime.utcnow() + timedelta(days=days)).isoformat() + "Z"
         events_result = service.events().list(
-            calendarId="primary", timeMin=now, timeMax=end,
+            calendarId="ilyakrivorot2@gmail.com", timeMin=now, timeMax=end,
             maxResults=10, singleEvents=True, orderBy="startTime"
         ).execute()
         events = events_result.get("items", [])
@@ -213,7 +213,7 @@ def create_calendar_event(title, date, time=None, description=""):
                 "start": {"date": date},
                 "end": {"date": date},
             }
-        service.events().insert(calendarId="primary", body=event).execute()
+        service.events().insert(calendarId="ilyakrivorot2@gmail.com", body=event).execute()
         return f"Событие '{title}' создано на {date}"
     except Exception as e:
         print(f"Ошибка создания события: {e}")
