@@ -14,6 +14,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import base64
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+import caldav
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 tavily = TavilyClient(api_key=os.environ.get("TAVILY_API_KEY"))
@@ -22,6 +23,7 @@ resend.api_key = os.environ.get("RESEND_API_KEY")
 TELEGRAM_KEY = os.environ.get("TELEGRAM_TOKEN")
 ICLOUD_EMAIL = os.environ.get("ICLOUD_EMAIL")
 ICLOUD_PASSWORD = os.environ.get("ICLOUD_PASSWORD")
+ICLOUD_APP_PASSWORD = os.environ.get("ICLOUD_APP_PASSWORD")
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN")
@@ -36,6 +38,42 @@ def get_calendar_service():
         scopes=["https://www.googleapis.com/auth/calendar"]
     )
     return build("calendar", "v3", credentials=creds)
+
+def get_icloud_events(days=7):
+    try:
+        client_dav = caldav.DAVClient(
+            url="https://caldav.icloud.com",
+            username="kiakia@me.com",
+            password=ICLOUD_APP_PASSWORD
+        )
+        principal = client_dav.principal()
+        calendars = principal.calendars()
+        now = datetime.utcnow()
+        end = now + timedelta(days=days)
+        all_events = []
+        for calendar in calendars:
+            try:
+                events = calendar.date_search(start=now, end=end, expand=True)
+                for event in events:
+                    try:
+                        vevent = event.vobject_instance.vevent
+                        summary = str(vevent.summary.value) if hasattr(vevent, 'summary') else 'Без названия'
+                        dtstart = vevent.dtstart.value
+                        if hasattr(dtstart, 'isoformat'):
+                            start_str = dtstart.isoformat()
+                        else:
+                            start_str = str(dtstart)
+                        all_events.append(f"- {summary} — {start_str}")
+                    except:
+                        continue
+            except:
+                continue
+        if not all_events:
+            return ""
+        return "\n".join(all_events)
+    except Exception as e:
+        print(f"Ошибка iCloud календаря: {e}")
+        return ""
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -192,13 +230,15 @@ def get_calendar_events(days=7):
                 all_events.extend(events_result.get("items", []))
             except:
                 continue
-        if not all_events:
-            return "Событий не найдено"
-        all_events.sort(key=lambda e: e["start"].get("dateTime", e["start"].get("date", "")))
         result = []
         for e in all_events:
             start = e["start"].get("dateTime", e["start"].get("date", ""))
             result.append(f"- {e.get('summary', 'Без названия')} — {start}")
+        icloud_events = get_icloud_events(days)
+        if icloud_events:
+            result.append(icloud_events)
+        if not result:
+            return "Событий не найдено"
         return "\n".join(result)
     except Exception as e:
         print(f"Ошибка календаря: {e}")
@@ -242,7 +282,7 @@ tools = [
     {"name": "search_web", "description": "Поиск актуальной информации в интернете", "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
     {"name": "get_emails", "description": "Получить последние письма из iCloud почты пользователя", "input_schema": {"type": "object", "properties": {"count": {"type": "integer"}}}},
     {"name": "send_email", "description": "Отправить письмо пользователя", "input_schema": {"type": "object", "properties": {"to": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}, "required": ["to", "subject", "body"]}},
-    {"name": "get_calendar_events", "description": "Получить предстоящие события из Google Calendar", "input_schema": {"type": "object", "properties": {"days": {"type": "integer"}}}},
+    {"name": "get_calendar_events", "description": "Получить предстоящие события из Google Calendar и iCloud Calendar", "input_schema": {"type": "object", "properties": {"days": {"type": "integer"}}}},
     {"name": "create_calendar_event", "description": "Создать новое событие в Google Calendar", "input_schema": {"type": "object", "properties": {"title": {"type": "string"}, "date": {"type": "string", "description": "Дата в формате YYYY-MM-DD"}, "time": {"type": "string", "description": "Время в формате HH:MM"}, "description": {"type": "string"}}, "required": ["title", "date"]}}
 ]
 
@@ -386,4 +426,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
