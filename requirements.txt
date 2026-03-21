@@ -31,3 +31,4 @@ resend
 groq
 google-api-python-client
 google-auth
+caldav
