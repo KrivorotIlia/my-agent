@@ -6,3 +6,4 @@ tavily-python
 google-auth
 google-api-python-client
 caldav
+vobject
