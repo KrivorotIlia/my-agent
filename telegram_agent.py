@@ -1,13 +1,15 @@
 import os
 import json
+import logging
 import sqlite3
 import imaplib
 import email
 from email.header import decode_header
+from datetime import datetime, timedelta, time as dt_time
+from zoneinfo import ZoneInfo
 import anthropic
 import resend
 from groq import Groq
-from datetime import datetime, timedelta
 from tavily import TavilyClient
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -15,6 +17,14 @@ import base64
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import caldav
+
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+DUBAI_TZ = ZoneInfo("Asia/Dubai")
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 tavily = TavilyClient(api_key=os.environ.get("TAVILY_API_KEY"))
@@ -27,6 +37,7 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN")
 DB_PATH = "memory.db"
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 def get_calendar_service():
     import json
@@ -83,8 +94,36 @@ def init_db():
         content TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS subscribers (
+        chat_id INTEGER PRIMARY KEY,
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
     conn.commit()
     conn.close()
+
+def save_subscriber(chat_id: int):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("INSERT OR IGNORE INTO subscribers (chat_id) VALUES (?)", (chat_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка сохранения подписчика {chat_id}: {e}")
+
+def get_subscribers() -> list[int]:
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute("SELECT chat_id FROM subscribers").fetchall()
+        conn.close()
+        ids = [r[0] for r in rows]
+        if TELEGRAM_CHAT_ID and int(TELEGRAM_CHAT_ID) not in ids:
+            ids.append(int(TELEGRAM_CHAT_ID))
+        return ids
+    except Exception as e:
+        logger.error(f"Ошибка получения подписчиков: {e}")
+        if TELEGRAM_CHAT_ID:
+            return [int(TELEGRAM_CHAT_ID)]
+        return []
 
 def save_message(user_id, role, content):
     conn = sqlite3.connect(DB_PATH)
@@ -274,6 +313,63 @@ def transcribe_voice(file_path):
         )
     return transcription.text
 
+def compose_briefing() -> str:
+    today = datetime.now(DUBAI_TZ).strftime("%d.%m.%Y")
+    parts = [f"☀️ Доброе утро! Вот твой брифинг на {today}.\n"]
+
+    # --- Календарь ---
+    try:
+        events = get_calendar_events(days=1)
+        if events and events != "Событий не найдено":
+            parts.append("📅 *События на сегодня:*\n" + events)
+        else:
+            parts.append("📅 Сегодня событий нет.")
+    except Exception as e:
+        logger.error(f"Брифинг: ошибка календаря: {e}")
+
+    # --- Почта ---
+    try:
+        raw_emails = get_emails(count=5)
+        if raw_emails and "Ошибка" not in raw_emails and "не найдены" not in raw_emails:
+            summary_response = client.messages.create(
+                model="claude-opus-4-5",
+                max_tokens=512,
+                messages=[{"role": "user", "content": (
+                    "Вот последние письма из почты пользователя:\n\n"
+                    f"{raw_emails}\n\n"
+                    "Дай краткую сводку на русском (2-4 предложения): какие письма важны, "
+                    "на что нужно обратить внимание. Без лишних вступлений."
+                )}]
+            )
+            mail_summary = summary_response.content[0].text
+            parts.append("✉️ *Важное в почте:*\n" + mail_summary)
+    except Exception as e:
+        logger.error(f"Брифинг: ошибка почты: {e}")
+
+    return "\n\n".join(parts)
+
+async def send_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Запуск утреннего брифинга...")
+    subscribers = get_subscribers()
+    if not subscribers:
+        logger.warning("Брифинг: нет подписчиков.")
+        return
+    try:
+        text = compose_briefing()
+    except Exception as e:
+        logger.error(f"Брифинг: ошибка сборки: {e}")
+        return
+    for chat_id in subscribers:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="Markdown",
+            )
+            logger.info(f"Брифинг отправлен → {chat_id}")
+        except Exception as e:
+            logger.error(f"Брифинг: ошибка отправки {chat_id}: {e}")
+
 tools = [
     {"name": "search_web", "description": "Поиск актуальной информации в интернете", "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
     {"name": "get_emails", "description": "Получить последние письма из iCloud почты пользователя", "input_schema": {"type": "object", "properties": {"count": {"type": "integer"}}}},
@@ -325,11 +421,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
     user_text = update.message.text
+    save_subscriber(update.effective_chat.id)
     await update.message.chat.send_action("typing")
     await process_message(update, user_id, user_name, user_text)
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    save_subscriber(update.effective_chat.id)
     await update.message.chat.send_action("typing")
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
@@ -351,6 +449,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    save_subscriber(update.effective_chat.id)
     await update.message.chat.send_action("typing")
     doc = update.message.document
     file = await context.bot.get_file(doc.file_id)
@@ -395,6 +494,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
+    save_subscriber(update.effective_chat.id)
     await update.message.chat.send_action("typing")
     voice = update.message.voice
     file = await context.bot.get_file(voice.file_id)
@@ -407,17 +507,41 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name
-    await update.message.reply_text(f"Привет, {name}! Я твой персональный ассистент. Могу искать информацию, читать и отправлять письма, управлять календарём, анализировать фото и файлы, принимать голосовые сообщения!")
+    save_subscriber(update.effective_chat.id)
+    await update.message.reply_text(
+        f"Привет, {name}! Я твой персональный ассистент. Могу искать информацию, "
+        "читать и отправлять письма, управлять календарём, анализировать фото и файлы, "
+        "принимать голосовые сообщения!\n\n"
+        "Каждое утро в 08:00 по Дубаю буду присылать тебе брифинг. "
+        "Или вызови его вручную командой /briefing."
+    )
+
+async def handle_briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_subscriber(update.effective_chat.id)
+    await update.message.chat.send_action("typing")
+    try:
+        text = compose_briefing()
+        await update.message.reply_text(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"/briefing: {e}")
+        await update.message.reply_text("Не удалось собрать брифинг, попробуй позже.")
 
 def main():
     init_db()
     app = Application.builder().token(TELEGRAM_KEY).build()
+
     app.add_handler(CommandHandler("start", handle_start))
+    app.add_handler(CommandHandler("briefing", handle_briefing_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    print("Бот запущен!")
+
+    briefing_time = dt_time(8, 0, tzinfo=DUBAI_TZ)
+    app.job_queue.run_daily(send_morning_briefing, time=briefing_time)
+    logger.info(f"Утренний брифинг запланирован на 08:00 Asia/Dubai")
+
+    logger.info("Бот запущен!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
