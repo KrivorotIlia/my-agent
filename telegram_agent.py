@@ -21,8 +21,7 @@ tavily = TavilyClient(api_key=os.environ.get("TAVILY_API_KEY"))
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 resend.api_key = os.environ.get("RESEND_API_KEY")
 TELEGRAM_KEY = os.environ.get("TELEGRAM_TOKEN")
-ICLOUD_EMAIL = os.environ.get("ICLOUD_EMAIL")
-ICLOUD_PASSWORD = os.environ.get("ICLOUD_PASSWORD")
+ICLOUD_EMAIL = "kiakia@me.com"
 ICLOUD_APP_PASSWORD = os.environ.get("ICLOUD_APP_PASSWORD")
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
@@ -43,7 +42,7 @@ def get_icloud_events(days=7):
     try:
         client_dav = caldav.DAVClient(
             url="https://caldav.icloud.com",
-            username="kiakia@me.com",
+            username=ICLOUD_EMAIL,
             password=ICLOUD_APP_PASSWORD
         )
         principal = client_dav.principal()
@@ -163,41 +162,38 @@ def get_body(msg):
         return ""
 
 def get_emails(count=5):
+    if not ICLOUD_APP_PASSWORD:
+        return "Почта не настроена (нет пароля ICLOUD_APP_PASSWORD)"
     try:
         mail = imaplib.IMAP4_SSL("imap.mail.me.com")
-        mail.login(ICLOUD_EMAIL, ICLOUD_PASSWORD)
-        _, folders = mail.list()
+        mail.login(ICLOUD_EMAIL, ICLOUD_APP_PASSWORD)
+        mail.select("INBOX")
+        _, data = mail.uid("search", None, "ALL")
+        uids = data[0].split()
         all_emails = []
-        for folder in folders:
+        for uid in reversed(uids[-count:]):
             try:
-                folder_name = folder.decode().split('"/"')[-1].strip().strip('"')
-                status, _ = mail.select(folder_name, readonly=True)
-                if status != "OK":
+                _, msg_data = mail.uid("fetch", uid, "(BODY.PEEK[])")
+                raw_email = None
+                for part in msg_data:
+                    if isinstance(part, tuple) and len(part) > 1 and isinstance(part[1], bytes):
+                        raw_email = part[1]
+                        break
+                if not raw_email:
                     continue
-                _, data = mail.search(None, "ALL")
-                if not data[0]:
-                    continue
-                ids = data[0].split()
-                for eid in ids[-2:]:
-                    try:
-                        _, msg_data = mail.fetch(eid, "(RFC822)")
-                        raw_email = msg_data[0][1]
-                        if not isinstance(raw_email, bytes):
-                            continue
-                        msg = email.message_from_bytes(raw_email)
-                        subject = decode_subject(msg.get("Subject", ""))
-                        from_ = msg.get("From", "")
-                        date_ = msg.get("Date", "")
-                        body = get_body(msg)
-                        all_emails.append({"date": date_, "text": f"От: {from_}\nТема: {subject}\nДата: {date_}\n{body[:300]}"})
-                    except:
-                        continue
-            except:
+                msg = email.message_from_bytes(raw_email)
+                subject = decode_subject(msg.get("Subject", ""))
+                from_ = decode_subject(msg.get("From", ""))
+                date_ = msg.get("Date", "")
+                body = get_body(msg)
+                all_emails.append(f"От: {from_}\nТема: {subject}\nДата: {date_}\n{body[:300]}")
+            except Exception as e:
+                print(f"Пропущено письмо {uid}: {e}")
                 continue
         mail.logout()
         if not all_emails:
             return "Письма не найдены"
-        return "\n\n---\n\n".join([e["text"] for e in all_emails[-count:]])
+        return "\n\n---\n\n".join(all_emails)
     except Exception as e:
         print(f"Ошибка чтения почты: {e}")
         return f"Ошибка чтения почты: {e}"
